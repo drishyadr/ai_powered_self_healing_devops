@@ -8,21 +8,77 @@ def decide_action(cpu, memory, restarts):
     return "ALERT_ONLY"
 
 
-def execute_action(action, pod_name, namespace="default"):
+SYSTEM_PODS = [
+    "kube-apiserver",
+    "kube-scheduler",
+    "kube-controller-manager",
+    "etcd",
+    "prometheus",
+    "storage-provisioner",
+    "coredns",
+    "kube-proxy"
+]
+
+def is_system_pod(pod_name):
+    return any(sys in pod_name for sys in SYSTEM_PODS)
+
+
+def execute_action(action, pod_name):
+    if is_system_pod(pod_name):
+        return "Protected system pod — alert only"
+
+    if action == "RESTART_POD":
+        return restart_pod(pod_name)
+
+    elif action == "SCALE_DEPLOYMENT":
+        deployment = pod_name.rsplit("-", 2)[0]
+        return scale_deployment(deployment, replicas=3)
+
+    else:
+        return "Alert only — no action"
+
+
+from k8s_client import get_k8s_clients
+
+def restart_pod(pod_name):
+    core_v1, _ = get_k8s_clients()
     try:
-        if action == "RESTART_POD":
-            subprocess.run(
-                ["kubectl", "delete", "pod", pod_name, "-n", namespace],
-                check=False,
-                capture_output=True,
-                text=True
-            )
+        pods = core_v1.list_pod_for_all_namespaces(field_selector=f"metadata.name={pod_name}")
+        if not pods.items:
+            return f"Pod {pod_name} not found"
 
-        elif action == "SCALE_DEPLOYMENT":
-            print(f"[INFO] Recommend scaling deployment for pod {pod_name}")
+        namespace = pods.items[0].metadata.namespace
 
-        else:
-            print(f"[INFO] Alert only for pod {pod_name}")
+        core_v1.delete_namespaced_pod(
+            name=pod_name,
+            namespace=namespace,
+            grace_period_seconds=0
+        )
+        return f"Pod {pod_name} restarted in {namespace}"
 
-    except FileNotFoundError:
-        print("[WARN] kubectl not found — action simulated only")
+    except Exception as e:
+        return f"Restart failed: {str(e)}"
+
+
+def scale_deployment(deployment_name, replicas):
+    _, apps_v1 = get_k8s_clients()
+    try:
+        deployments = apps_v1.list_deployment_for_all_namespaces(
+            field_selector=f"metadata.name={deployment_name}"
+        )
+        if not deployments.items:
+            return f"Deployment {deployment_name} not found"
+
+        namespace = deployments.items[0].metadata.namespace
+
+        body = {"spec": {"replicas": replicas}}
+        apps_v1.patch_namespaced_deployment_scale(
+            name=deployment_name,
+            namespace=namespace,
+            body=body
+        )
+
+        return f"Scaled {deployment_name} to {replicas} in {namespace}"
+
+    except Exception as e:
+        return f"Scaling failed: {str(e)}"
