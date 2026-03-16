@@ -4,6 +4,7 @@ import subprocess
 from prometheus import get_cpu_usage, get_memory_usage, get_pod_restarts
 from db import get_db_connection, fetch_recent_metrics
 from ml.anomaly_detector import AnomalyDetector
+from ml.memory_lstm_detector import MemoryLSTMDetector
 from ml.utils import decide_action, execute_action
 
 app = FastAPI()
@@ -73,6 +74,7 @@ def heal_pod(pod_name):
 
 @app.get("/detect_anomalies")
 def detect_anomalies():
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
@@ -86,6 +88,7 @@ def detect_anomalies():
 
     for pod in pods:
         if pod["cpu_usage"] > CPU_THRESHOLD or pod["restarts"] > RESTART_THRESHOLD:
+
             if is_system_pod(pod["pod_name"]):
                 action = "ALERT_ONLY"
             else:
@@ -99,14 +102,17 @@ def detect_anomalies():
 
     cursor.close()
     conn.close()
+
     return actions
 
 # ------------------- ML-BASED PREDICTIVE HEALING -------------------
+
 detector = None
 ANOMALY_THRESHOLD = 0.0103
 
 @app.get("/predict_anomalies")
 def predict_anomalies():
+
     global detector
 
     if detector is None:
@@ -123,12 +129,14 @@ def predict_anomalies():
         }
 
     results = []
-    handled_pods = set()  # 🔁 Prevent duplicate actions
+    handled_pods = set()
 
     for metric in ["cpu_usage", "memory_usage", "restart_count"]:
+
         anomalies = detector.detect_metric(df, metric, ANOMALY_THRESHOLD)
 
         for _, row in anomalies.iterrows():
+
             pod_name = row["pod_name"]
 
             if pod_name in handled_pods:
@@ -146,6 +154,7 @@ def predict_anomalies():
                     recent["memory_usage"],
                     recent["restart_count"]
                 )
+
                 execute_action(action, pod_name)
 
             results.append({
@@ -158,5 +167,53 @@ def predict_anomalies():
 
     return {
         "total_anomalies": len(results),
+        "details": results
+    }
+
+# ------------------- MEMORY LSTM ANOMALY DETECTION -------------------
+
+memory_detector = MemoryLSTMDetector()
+
+@app.get("/memory_lstm_anomalies")
+def memory_lstm_anomalies():
+
+    df = fetch_recent_metrics(minutes=10)
+
+    if df.empty or len(df) < 35:
+        return {
+            "status": "not_enough_data",
+            "rows_found": len(df),
+            "required_min": 35
+        }
+
+    anomalies = memory_detector.detect(df)
+
+    results = []
+
+    for _, row in anomalies.iterrows():
+
+        pod_name = row["pod_name"]
+
+        if is_system_pod(pod_name):
+            action = "ALERT_ONLY"
+        else:
+            action = decide_action(
+                row["cpu_usage"],
+                row["memory_usage"],
+                row["restart_count"]
+            )
+
+            execute_action(action, pod_name)
+
+        results.append({
+            "pod": pod_name,
+            "memory_usage": float(row["memory_usage"]),
+            "anomaly_score": float(row["anomaly_score"]),
+            "timestamp": str(row["timestamp"]),
+            "action": action
+        })
+
+    return {
+        "total_memory_anomalies": len(results),
         "details": results
     }
