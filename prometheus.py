@@ -1,6 +1,6 @@
 import requests
 
-PROMETHEUS_URL = "http://localhost:9200/api/v1/query"
+PROMETHEUS_URL = "http://localhost:8085/api/v1/query"
 
 def query_prometheus(query):
     response = requests.get(PROMETHEUS_URL, params={'query': query})
